@@ -110,17 +110,35 @@ struct ARViewContainer: UIViewRepresentable {
         arView.addGestureRecognizer(rotationGestureRecognizer)
         
         context.coordinator.arView = arView
+        context.coordinator.updateBindings(
+            selectedShape: $selectedShape,
+            sideLength: $sideLength,
+            radius: $radius,
+            baseLength: $baseLength,
+            height: $height
+        )
+        
         context.coordinator.createShape(ofType: selectedShape) // Create the initial shape
         
         return arView
     }
     
     func updateUIView(_ uiView: ARView, context: Context) {
-        // Convert text input to numeric values in cm, then to meters by dividing by 100
-        context.coordinator.sideLength = (Double(sideLength) ?? 3) / 100.0
-        context.coordinator.radius = (Double(radius) ?? 1.5) / 100.0
-        context.coordinator.baseLength = (Double(baseLength) ?? 3) / 100.0
-        context.coordinator.height = (Double(height) ?? 2) / 100.0
+        guard !context.coordinator.isPinchGestureActive else { return }
+        
+        // Only update if the values have changed to avoid overriding gesture updates
+        if let currentSideLength = Double(sideLength), currentSideLength / 100.0 != context.coordinator.sideLength {
+            context.coordinator.sideLength = currentSideLength / 100.0
+        }
+        if let currentRadius = Double(radius), currentRadius / 100.0 != context.coordinator.radius {
+            context.coordinator.radius = currentRadius / 100.0
+        }
+        if let currentBaseLength = Double(baseLength), currentBaseLength / 100.0 != context.coordinator.baseLength {
+            context.coordinator.baseLength = currentBaseLength / 100.0
+        }
+        if let currentHeight = Double(height), currentHeight / 100.0 != context.coordinator.height {
+            context.coordinator.height = currentHeight / 100.0
+        }
         
         context.coordinator.createShape(ofType: selectedShape)
     }
@@ -139,6 +157,29 @@ struct ARViewContainer: UIViewRepresentable {
         var radius: Double = 0.015
         var baseLength: Double = 0.03
         var height: Double = 0.02
+        
+        var selectedShapeBinding: Binding<ShapeType>?
+        var sideLengthBinding: Binding<String>?
+        var radiusBinding: Binding<String>?
+        var baseLengthBinding: Binding<String>?
+        var heightBinding: Binding<String>?
+        
+        // Flag to indicate when the pinch gesture is active
+        var isPinchGestureActive: Bool = false
+        
+        func updateBindings(
+            selectedShape: Binding<ShapeType>,
+            sideLength: Binding<String>,
+            radius: Binding<String>,
+            baseLength: Binding<String>,
+            height: Binding<String>
+        ) {
+            self.selectedShapeBinding = selectedShape
+            self.sideLengthBinding = sideLength
+            self.radiusBinding = radius
+            self.baseLengthBinding = baseLength
+            self.heightBinding = height
+        }
         
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
             return true
@@ -219,119 +260,145 @@ struct ARViewContainer: UIViewRepresentable {
             parent.addChild(textEntity)
             self.textEntity = textEntity
         }
-
-        func createCube() -> ModelEntity {
-            let mesh = MeshResource.generateBox(size: Float(sideLength))
-            let material = SimpleMaterial(color: .blue, isMetallic: false)
-            return ModelEntity(mesh: mesh, materials: [material])
-        }
-
-        func createSphere() -> ModelEntity {
-            let mesh = MeshResource.generateSphere(radius: Float(radius))
-            let material = SimpleMaterial(color: .red, isMetallic: false)
-            return ModelEntity(mesh: mesh, materials: [material])
-        }
-
-        // Create a pyramid model using updated base length and height in cm
-        func createPyramid() -> ModelEntity {
-            let halfBase = Float(baseLength) / 2.0
-            let vertices: [SIMD3<Float>] = [
-                SIMD3(0, Float(height), 0),   // Top vertex
-                SIMD3(-halfBase, 0, -halfBase), // Base vertices
-                SIMD3(halfBase, 0, -halfBase),
-                SIMD3(halfBase, 0, halfBase),
-                SIMD3(-halfBase, 0, halfBase)
-            ]
-            
-            let indices: [UInt32] = [
-                0, 1, 2,   // Side triangles
-                0, 2, 3,
-                0, 3, 4,
-                0, 4, 1,
-                1, 2, 3,   // Base square
-                3, 4, 1
-            ]
-            
-            var descriptor = MeshDescriptor(name: "Pyramid")
-            descriptor.positions = MeshBuffers.Positions(vertices)
-            descriptor.primitives = .triangles(indices)
-            
-            let mesh = try! MeshResource.generate(from: [descriptor])
-            let material = SimpleMaterial(color: .yellow, isMetallic: false)
-            return ModelEntity(mesh: mesh, materials: [material])
-        }
-
-        // Create a vertically oriented octagon model using custom vertices and indices
-        func createOctagon() -> ModelEntity {
-            let angleIncrement = (2.0 * Float.pi) / 8.0
-            let radius: Float = 0.011 // 1.1 cm in meters
-            
-            var vertices: [SIMD3<Float>] = []
-            for i in 0..<8 {
-                let angle = Float(i) * angleIncrement
-                let x = radius * cos(angle)
-                let y = radius * sin(angle)
-                vertices.append(SIMD3(x, y, 0))
-            }
-            
-            vertices.append(SIMD3(0, 0, 0))  // Center point
-
-            var indices: [UInt32] = []
-            for i in 0..<8 {
-                indices.append(UInt32(8))    // Center point index
-                indices.append(UInt32(i))    // Current vertex
-                indices.append(UInt32((i + 1) % 8)) // Next vertex
-            }
-            
-            var descriptor = MeshDescriptor(name: "Octagon")
-            descriptor.positions = MeshBuffers.Positions(vertices)
-            descriptor.primitives = .triangles(indices)
-            
-            let mesh = try! MeshResource.generate(from: [descriptor])
-            let material = SimpleMaterial(color: .green, isMetallic: false)
-            
-            let octagonEntity = ModelEntity(mesh: mesh, materials: [material])
-            octagonEntity.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-            
-            return octagonEntity
-        }
-
-        // Handle tap gesture to change shape color
-        @objc func handleTap(_ sender: UITapGestureRecognizer) {
-            guard let arView = arView, let currentEntity = currentEntity else { return }
-            let tapLocation = sender.location(in: arView)
-            if let tappedEntity = arView.entity(at: tapLocation), tappedEntity == currentEntity {
-                let randomColor = UIColor(
-                    red: CGFloat.random(in: 0...1),
-                    green: CGFloat.random(in: 0...1),
-                    blue: CGFloat.random(in: 0...1),
-                    alpha: 1.0
-                )
-                
-                let material = SimpleMaterial(color: randomColor, isMetallic: false)
-                if let modelEntity = tappedEntity as? ModelEntity {
-                    modelEntity.model?.materials = [material]
-                    print("Color changed to: \(randomColor)")
-                }
-            }
-        }
         
+        func createCube() -> ModelEntity {
+                   let mesh = MeshResource.generateBox(size: Float(sideLength))
+                   let material = SimpleMaterial(color: .blue, isMetallic: false)
+                   return ModelEntity(mesh: mesh, materials: [material])
+               }
+
+               func createSphere() -> ModelEntity {
+                   let mesh = MeshResource.generateSphere(radius: Float(radius))
+                   let material = SimpleMaterial(color: .red, isMetallic: false)
+                   return ModelEntity(mesh: mesh, materials: [material])
+               }
+
+               // Create a pyramid model using updated base length and height in cm
+               func createPyramid() -> ModelEntity {
+                   let halfBase = Float(baseLength) / 2.0
+                   let vertices: [SIMD3<Float>] = [
+                       SIMD3(0, Float(height), 0),   // Top vertex
+                       SIMD3(-halfBase, 0, -halfBase), // Base vertices
+                       SIMD3(halfBase, 0, -halfBase),
+                       SIMD3(halfBase, 0, halfBase),
+                       SIMD3(-halfBase, 0, halfBase)
+                   ]
+                   
+                   let indices: [UInt32] = [
+                       0, 1, 2,   // Side triangles
+                       0, 2, 3,
+                       0, 3, 4,
+                       0, 4, 1,
+                       1, 2, 3,   // Base square
+                       3, 4, 1
+                   ]
+                   
+                   var descriptor = MeshDescriptor(name: "Pyramid")
+                   descriptor.positions = MeshBuffers.Positions(vertices)
+                   descriptor.primitives = .triangles(indices)
+                   
+                   let mesh = try! MeshResource.generate(from: [descriptor])
+                   let material = SimpleMaterial(color: .yellow, isMetallic: false)
+                   return ModelEntity(mesh: mesh, materials: [material])
+               }
+
+               // Create a vertically oriented octagon model using custom vertices and indices
+               func createOctagon() -> ModelEntity {
+                   let angleIncrement = (2.0 * Float.pi) / 8.0
+                   let radius: Float = 0.011 // 1.1 cm in meters
+                   
+                   var vertices: [SIMD3<Float>] = []
+                   for i in 0..<8 {
+                       let angle = Float(i) * angleIncrement
+                       let x = radius * cos(angle)
+                       let y = radius * sin(angle)
+                       vertices.append(SIMD3(x, y, 0))
+                   }
+                   
+                   vertices.append(SIMD3(0, 0, 0))  // Center point
+
+                   var indices: [UInt32] = []
+                   for i in 0..<8 {
+                       indices.append(UInt32(8))    // Center point index
+                       indices.append(UInt32(i))    // Current vertex
+                       indices.append(UInt32((i + 1) % 8)) // Next vertex
+                   }
+                   
+                   var descriptor = MeshDescriptor(name: "Octagon")
+                   descriptor.positions = MeshBuffers.Positions(vertices)
+                   descriptor.primitives = .triangles(indices)
+                   
+                   let mesh = try! MeshResource.generate(from: [descriptor])
+                   let material = SimpleMaterial(color: .green, isMetallic: false)
+                   
+                   let octagonEntity = ModelEntity(mesh: mesh, materials: [material])
+                   octagonEntity.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+                   
+                   return octagonEntity
+               }
+
+               // Handle tap gesture to change shape color
+               @objc func handleTap(_ sender: UITapGestureRecognizer) {
+                   guard let arView = arView, let currentEntity = currentEntity else { return }
+                   let tapLocation = sender.location(in: arView)
+                   if let tappedEntity = arView.entity(at: tapLocation), tappedEntity == currentEntity {
+                       let randomColor = UIColor(
+                           red: CGFloat.random(in: 0...1),
+                           green: CGFloat.random(in: 0...1),
+                           blue: CGFloat.random(in: 0...1),
+                           alpha: 1.0
+                       )
+                       
+                       let material = SimpleMaterial(color: randomColor, isMetallic: false)
+                       if let modelEntity = tappedEntity as? ModelEntity {
+                           modelEntity.model?.materials = [material]
+                           print("Color changed to: \(randomColor)")
+                       }
+                   }
+               }
+        
+        @objc func handleRotation(_ sender: UIRotationGestureRecognizer) {
+                    guard let entity = currentEntity else { return }
+                    let rotationAngle = Float(sender.rotation)
+                    if sender.state == .changed || sender.state == .began {
+                        let rotation = simd_quatf(angle: rotationAngle, axis: [0, 1, 0])
+                        entity.orientation *= rotation
+                        sender.rotation = 0
+                    }
+                }
+
         @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
             guard let entity = currentEntity else { return }
+            
+            if sender.state == .began {
+                isPinchGestureActive = true
+            }
+            
             if sender.state == .changed {
                 let scale = sender.scale
                 entity.scale *= SIMD3<Float>(repeating: Float(scale))
                 sender.scale = 1.0
+                
+                // Update SwiftUI bindings
+                updateBindingsAfterPinch(for: entity)
+            }
+            
+            if sender.state == .ended {
+                isPinchGestureActive = false
             }
         }
         
-        @objc func handleRotation(_ sender: UIRotationGestureRecognizer) {
-            guard let entity = currentEntity else { return }
-            let rotationAngle = Float(sender.rotation)
-            if sender.state == .changed || sender.state == .began {
-                let rotation = simd_quatf(angle: rotationAngle, axis: [0, 1, 0])
-                entity.orientation *= rotation
-                sender.rotation = 0
+        private func updateBindingsAfterPinch(for entity: ModelEntity) {
+            switch selectedShapeBinding?.wrappedValue {
+            case .cube:
+                sideLengthBinding?.wrappedValue = String(format: "%.2f", Double(entity.scale.x) * 3.0)
+            case .sphere:
+                radiusBinding?.wrappedValue = String(format: "%.2f", Double(entity.scale.x) * 1.5)
+            case .pyramid:
+                baseLengthBinding?.wrappedValue = String(format: "%.2f", Double(entity.scale.x) * 3.0)
+                heightBinding?.wrappedValue = String(format: "%.2f", Double(entity.scale.y) * 2.0)
+            default:
+                break
             }
         }
     }
