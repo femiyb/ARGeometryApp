@@ -1,6 +1,8 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import Vision
+import CoreML
 
 // Main Content View
 struct ContentView: View {
@@ -97,6 +99,9 @@ struct ARViewContainer: UIViewRepresentable {
         config.planeDetection = [.horizontal]
         arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
         
+        // Set the AR session delegate for object detection
+        arView.session.delegate = context.coordinator
+        
         // Add Gesture Recognizers
         let tapGestureRecognizer = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap(_:)))
         arView.addGestureRecognizer(tapGestureRecognizer)
@@ -148,7 +153,10 @@ struct ARViewContainer: UIViewRepresentable {
     }
     
     // Coordinator class to handle gesture events
-    class Coordinator: NSObject, UIGestureRecognizerDelegate {
+    class Coordinator: NSObject, UIGestureRecognizerDelegate, ARSessionDelegate {
+        var frameCounter = 0
+        let frameInterval = 10 // Perform detection every 10 frames
+        
         var arView: ARView?
         var currentEntity: ModelEntity?
         var textEntity: Entity?
@@ -166,6 +174,14 @@ struct ARViewContainer: UIViewRepresentable {
         
         // Flag to indicate when the pinch gesture is active
         var isPinchGestureActive: Bool = false
+        
+        // Object Detector
+        private var objectDetector: ObjectDetector?
+        
+        override init() {
+            super.init()
+            objectDetector = ObjectDetector()
+        }
         
         func updateBindings(
             selectedShape: Binding<ShapeType>,
@@ -188,11 +204,12 @@ struct ARViewContainer: UIViewRepresentable {
         func createShape(ofType shapeType: ShapeType) {
             guard let arView = arView else { return }
             
-            // Remove existing entities
             currentEntity?.removeFromParent()
-            textEntity?.removeFromParent()
             
-            // Create the new shape
+            for anchor in arView.scene.anchors {
+                anchor.children.removeAll(where: { $0 is TextEntity })
+            }
+            
             switch shapeType {
             case .cube:
                 currentEntity = createCube()
@@ -210,162 +227,200 @@ struct ARViewContainer: UIViewRepresentable {
                 arView.scene.addAnchor(anchorEntity)
                 currentEntity.generateCollisionShapes(recursive: true)
                 
-                // Add text label above the shape
                 addTextLabel(for: shapeType, to: anchorEntity)
             }
         }
 
+        func addLengthLabel(_ text: String, position: SIMD3<Float>, orientation: simd_quatf, to parent: Entity, fontSize: Float) {
+            let labelEntity = TextEntity(text: text, fontSize: fontSize, color: .yellow)
+            labelEntity.position = position
+            labelEntity.orientation = orientation
+            parent.addChild(labelEntity)
+        }
+
         func addTextLabel(for shapeType: ShapeType, to parent: Entity) {
-            let description: String
+            var description = ""
+            var fontSize: Float = 0.02
+            
             switch shapeType {
             case .cube:
+                let sideLengthCM = sideLength * 100
                 let volume = pow(sideLength, 3)
+                let formula = "Volume = a³"
                 description = """
                 Cube
-                Side: \(sideLength * 100) cm
+                Side Length: \(String(format: "%.2f", sideLengthCM)) cm
                 Volume: \(String(format: "%.3f", volume * 1_000_000)) cm³
+                \(formula)
                 """
                 
+                fontSize = Float(sideLength * 0.1)
+                
+                let sidePosition = SIMD3<Float>(Float(sideLength / 2), 0, 0)
+                let sideOrientation = simd_quatf(angle: .pi / 2, axis: [0, 0, 1])
+                addLengthLabel("\(String(format: "%.2f", sideLengthCM)) cm", position: sidePosition, orientation: sideOrientation, to: parent, fontSize: fontSize)
+
             case .sphere:
                 let volume = (4.0 / 3.0) * Double.pi * pow(radius, 3)
                 description = """
                 Sphere
-                Radius: \(radius * 100) cm
+                Radius: \(String(format: "%.2f", radius * 100)) cm
                 Volume: \(String(format: "%.3f", volume * 1_000_000)) cm³
+                Volume Formula: V = (4/3)πr³
                 """
+                
+                fontSize = Float(radius * 0.1)
+                
+                let radiusPosition = SIMD3<Float>(Float(radius), 0, 0)
+                let radiusOrientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+                addLengthLabel("r: \(String(format: "%.2f", radius * 100)) cm", position: radiusPosition, orientation: radiusOrientation, to: parent, fontSize: fontSize)
                 
             case .pyramid:
                 let baseArea = pow(baseLength, 2)
                 let volume = (1.0 / 3.0) * baseArea * height
                 description = """
                 Pyramid
-                Base: \(baseLength * 100) cm, Height: \(height * 100) cm
+                Base: \(String(format: "%.2f", baseLength * 100)) cm, Height: \(String(format: "%.2f", height * 100)) cm
                 Volume: \(String(format: "%.3f", volume * 1_000_000)) cm³
+                Volume Formula: V = (1/3) × Base² × Height
                 """
                 
+                fontSize = Float(max(baseLength, height) * 0.1)
+                
+                let basePosition = SIMD3<Float>(Float(baseLength / 2), 0, 0)
+                let baseOrientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+                addLengthLabel("Base: \(String(format: "%.2f", baseLength * 100)) cm", position: basePosition, orientation: baseOrientation, to: parent, fontSize: fontSize)
+                
+                let heightPosition = SIMD3<Float>(0, Float(height / 2), 0)
+                let heightOrientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+                addLengthLabel("Height: \(String(format: "%.2f", height * 100)) cm", position: heightPosition, orientation: heightOrientation, to: parent, fontSize: fontSize)
+                
             case .octagon:
-                let sideLengthInCM = 1.1 // Side length now set to 1.1 cm by default
+                let sideLengthInCM = 1.1
                 let perimeter = 8 * sideLengthInCM
                 let area = 2 * (1 + sqrt(2)) * pow(sideLengthInCM, 2)
                 description = """
                 Octagon
-                Side Length: \(sideLengthInCM) cm
+                Side Length: \(String(format: "%.2f", sideLengthInCM)) cm
                 Perimeter: \(String(format: "%.2f", perimeter)) cm
                 Area: \(String(format: "%.3f", area)) cm²
                 """
+                
+                fontSize = Float(sideLengthInCM * 0.05)
+                
+                let octagonSidePosition = SIMD3<Float>(Float(sideLengthInCM / 2), 0, 0)
+                let octagonSideOrientation = simd_quatf(angle: 0, axis: [0, 1, 0])
+                addLengthLabel("a: \(String(format: "%.2f", sideLengthInCM)) cm", position: octagonSidePosition, orientation: octagonSideOrientation, to: parent, fontSize: fontSize)
             }
             
-            let textEntity = TextEntity(text: description)
+            let textEntity = TextEntity(text: description, fontSize: 0.02, color: .yellow)
             textEntity.position = [0, 0.25, 0]
             parent.addChild(textEntity)
             self.textEntity = textEntity
         }
-        
+
         func createCube() -> ModelEntity {
-                   let mesh = MeshResource.generateBox(size: Float(sideLength))
-                   let material = SimpleMaterial(color: .blue, isMetallic: false)
-                   return ModelEntity(mesh: mesh, materials: [material])
-               }
+            let mesh = MeshResource.generateBox(size: Float(sideLength))
+            let material = SimpleMaterial(color: .blue, isMetallic: false)
+            return ModelEntity(mesh: mesh, materials: [material])
+        }
 
-               func createSphere() -> ModelEntity {
-                   let mesh = MeshResource.generateSphere(radius: Float(radius))
-                   let material = SimpleMaterial(color: .red, isMetallic: false)
-                   return ModelEntity(mesh: mesh, materials: [material])
-               }
+        func createSphere() -> ModelEntity {
+            let mesh = MeshResource.generateSphere(radius: Float(radius))
+            let material = SimpleMaterial(color: .red, isMetallic: false)
+            return ModelEntity(mesh: mesh, materials: [material])
+        }
 
-               // Create a pyramid model using updated base length and height in cm
-               func createPyramid() -> ModelEntity {
-                   let halfBase = Float(baseLength) / 2.0
-                   let vertices: [SIMD3<Float>] = [
-                       SIMD3(0, Float(height), 0),   // Top vertex
-                       SIMD3(-halfBase, 0, -halfBase), // Base vertices
-                       SIMD3(halfBase, 0, -halfBase),
-                       SIMD3(halfBase, 0, halfBase),
-                       SIMD3(-halfBase, 0, halfBase)
-                   ]
-                   
-                   let indices: [UInt32] = [
-                       0, 1, 2,   // Side triangles
-                       0, 2, 3,
-                       0, 3, 4,
-                       0, 4, 1,
-                       1, 2, 3,   // Base square
-                       3, 4, 1
-                   ]
-                   
-                   var descriptor = MeshDescriptor(name: "Pyramid")
-                   descriptor.positions = MeshBuffers.Positions(vertices)
-                   descriptor.primitives = .triangles(indices)
-                   
-                   let mesh = try! MeshResource.generate(from: [descriptor])
-                   let material = SimpleMaterial(color: .yellow, isMetallic: false)
-                   return ModelEntity(mesh: mesh, materials: [material])
-               }
+        func createPyramid() -> ModelEntity {
+            let halfBase = Float(baseLength) / 2.0
+            let vertices: [SIMD3<Float>] = [
+                SIMD3(0, Float(height), 0),
+                SIMD3(-halfBase, 0, -halfBase),
+                SIMD3(halfBase, 0, -halfBase),
+                SIMD3(halfBase, 0, halfBase),
+                SIMD3(-halfBase, 0, halfBase)
+            ]
+            
+            let indices: [UInt32] = [
+                0, 1, 2,
+                0, 2, 3,
+                0, 3, 4,
+                0, 4, 1,
+                1, 2, 3,
+                3, 4, 1
+            ]
+            
+            var descriptor = MeshDescriptor(name: "Pyramid")
+            descriptor.positions = MeshBuffers.Positions(vertices)
+            descriptor.primitives = .triangles(indices)
+            
+            let mesh = try! MeshResource.generate(from: [descriptor])
+            let material = SimpleMaterial(color: .yellow, isMetallic: false)
+            return ModelEntity(mesh: mesh, materials: [material])
+        }
 
-               // Create a vertically oriented octagon model using custom vertices and indices
-               func createOctagon() -> ModelEntity {
-                   let angleIncrement = (2.0 * Float.pi) / 8.0
-                   let radius: Float = 0.011 // 1.1 cm in meters
-                   
-                   var vertices: [SIMD3<Float>] = []
-                   for i in 0..<8 {
-                       let angle = Float(i) * angleIncrement
-                       let x = radius * cos(angle)
-                       let y = radius * sin(angle)
-                       vertices.append(SIMD3(x, y, 0))
-                   }
-                   
-                   vertices.append(SIMD3(0, 0, 0))  // Center point
+        func createOctagon() -> ModelEntity {
+            let angleIncrement = (2.0 * Float.pi) / 8.0
+            let radius: Float = 0.011
+            
+            var vertices: [SIMD3<Float>] = []
+            for i in 0..<8 {
+                let angle = Float(i) * angleIncrement
+                let x = radius * cos(angle)
+                let y = radius * sin(angle)
+                vertices.append(SIMD3(x, y, 0))
+            }
+            
+            vertices.append(SIMD3(0, 0, 0))
 
-                   var indices: [UInt32] = []
-                   for i in 0..<8 {
-                       indices.append(UInt32(8))    // Center point index
-                       indices.append(UInt32(i))    // Current vertex
-                       indices.append(UInt32((i + 1) % 8)) // Next vertex
-                   }
-                   
-                   var descriptor = MeshDescriptor(name: "Octagon")
-                   descriptor.positions = MeshBuffers.Positions(vertices)
-                   descriptor.primitives = .triangles(indices)
-                   
-                   let mesh = try! MeshResource.generate(from: [descriptor])
-                   let material = SimpleMaterial(color: .green, isMetallic: false)
-                   
-                   let octagonEntity = ModelEntity(mesh: mesh, materials: [material])
-                   octagonEntity.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
-                   
-                   return octagonEntity
-               }
+            var indices: [UInt32] = []
+            for i in 0..<8 {
+                indices.append(UInt32(8))
+                indices.append(UInt32(i))
+                indices.append(UInt32((i + 1) % 8))
+            }
+            
+            var descriptor = MeshDescriptor(name: "Octagon")
+            descriptor.positions = MeshBuffers.Positions(vertices)
+            descriptor.primitives = .triangles(indices)
+            
+            let mesh = try! MeshResource.generate(from: [descriptor])
+            let material = SimpleMaterial(color: .green, isMetallic: false)
+            
+            let octagonEntity = ModelEntity(mesh: mesh, materials: [material])
+            octagonEntity.orientation = simd_quatf(angle: .pi / 2, axis: [1, 0, 0])
+            
+            return octagonEntity
+        }
 
-               // Handle tap gesture to change shape color
-               @objc func handleTap(_ sender: UITapGestureRecognizer) {
-                   guard let arView = arView, let currentEntity = currentEntity else { return }
-                   let tapLocation = sender.location(in: arView)
-                   if let tappedEntity = arView.entity(at: tapLocation), tappedEntity == currentEntity {
-                       let randomColor = UIColor(
-                           red: CGFloat.random(in: 0...1),
-                           green: CGFloat.random(in: 0...1),
-                           blue: CGFloat.random(in: 0...1),
-                           alpha: 1.0
-                       )
-                       
-                       let material = SimpleMaterial(color: randomColor, isMetallic: false)
-                       if let modelEntity = tappedEntity as? ModelEntity {
-                           modelEntity.model?.materials = [material]
-                           print("Color changed to: \(randomColor)")
-                       }
-                   }
-               }
+        @objc func handleTap(_ sender: UITapGestureRecognizer) {
+            guard let arView = arView, let currentEntity = currentEntity else { return }
+            let tapLocation = sender.location(in: arView)
+            if let tappedEntity = arView.entity(at: tapLocation), tappedEntity == currentEntity {
+                let randomColor = UIColor(
+                    red: CGFloat.random(in: 0...1),
+                    green: CGFloat.random(in: 0...1),
+                    blue: CGFloat.random(in: 0...1),
+                    alpha: 1.0
+                )
+                
+                let material = SimpleMaterial(color: randomColor, isMetallic: false)
+                if let modelEntity = tappedEntity as? ModelEntity {
+                    modelEntity.model?.materials = [material]
+                    print("Color changed to: \(randomColor)")
+                }
+            }
+        }
         
         @objc func handleRotation(_ sender: UIRotationGestureRecognizer) {
-                    guard let entity = currentEntity else { return }
-                    let rotationAngle = Float(sender.rotation)
-                    if sender.state == .changed || sender.state == .began {
-                        let rotation = simd_quatf(angle: rotationAngle, axis: [0, 1, 0])
-                        entity.orientation *= rotation
-                        sender.rotation = 0
-                    }
-                }
+            guard let entity = currentEntity else { return }
+            let rotationAngle = Float(sender.rotation)
+            if sender.state == .changed || sender.state == .began {
+                let rotation = simd_quatf(angle: rotationAngle, axis: [0, 1, 0])
+                entity.orientation *= rotation
+                sender.rotation = 0
+            }
+        }
 
         @objc func handlePinch(_ sender: UIPinchGestureRecognizer) {
             guard let entity = currentEntity else { return }
@@ -379,7 +434,6 @@ struct ARViewContainer: UIViewRepresentable {
                 entity.scale *= SIMD3<Float>(repeating: Float(scale))
                 sender.scale = 1.0
                 
-                // Update SwiftUI bindings
                 updateBindingsAfterPinch(for: entity)
             }
             
@@ -400,6 +454,48 @@ struct ARViewContainer: UIViewRepresentable {
             default:
                 break
             }
+        }
+        
+        func session(_ session: ARSession, didUpdate frame: ARFrame) {
+            guard frameCounter % frameInterval == 0 else {
+                frameCounter += 1
+                return
+            }
+            frameCounter = 1 // Reset the frame counter after performing detection
+            
+            guard let model = objectDetector?.model else { return }
+            
+            // Run the request in a background queue
+            DispatchQueue.global(qos: .userInitiated).async {
+                let requestHandler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage, options: [:])
+                let request = VNCoreMLRequest(model: model) { request, error in
+                    guard let results = request.results as? [VNRecognizedObjectObservation] else { return }
+                    if let firstResult = results.first, let label = firstResult.labels.first {
+                        DispatchQueue.main.async {
+                            print("Detected shape: \(label.identifier)")
+                        }
+                    }
+                }
+                
+                do {
+                    try requestHandler.perform([request])
+                } catch {
+                    print("Failed to perform request: \(error.localizedDescription)")
+                }
+            }
+        }
+
+
+    }
+}
+
+// Object Detector for handling YOLOv3 model
+class ObjectDetector {
+    var model: VNCoreMLModel?
+    
+    init() {
+        if let visionModel = try? VNCoreMLModel(for: YOLOv3().model) {
+            self.model = visionModel
         }
     }
 }
